@@ -10,49 +10,5 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
-    <script type="text/javascript">
-      (function(l,e,a,p) {
-        if (window.Sprig) return;
-        window.Sprig = function(){S._queue.push(arguments)}
-        var S = window.Sprig;S.appId = a;S._queue = [];window.UserLeap=S;
-        a=l.createElement('script');
-        a.async=1;a.src=e+'?id='+S.appId;
-        p=l.getElementsByTagName('script')[0];
-        p.parentNode.insertBefore(a, p);
-      })(document, 'https://cdn.sprig.com/shim.js', 'm5kWudHKwk1S');
-    </script>
-    <script>
-      Sprig('setUserId', 'USER_ID');
-    </script>
-    <script>
-      Sprig('logoutUser');
-    </script>
-    <script>
-      // Track event with payload. Only eventName is required.
-      // Note: this function makes a network call, so be sure to give it enough time to complete
-      Sprig('identifyAndTrack', {
-        eventName: 'EVENT_NAME',
-        userId: 'some_user_id',
-        properties: { property1: 'value'}
-      });
-    </script>
-    <script>
-      // for a single attribute
-      Sprig('setAttribute', ATTRIBUTE, VALUE);
-
-      // for multiple attributes
-      // saves multiple round-trips and reduces data usage
-      Sprig('setAttributes',{
-        ATTRIBUTE1: VALUE1,
-          ATTRIBUTE2: VALUE2
-      });
-
-      // if attributes no longer apply to the user,
-      // you can delete multiple at a time
-      Sprig('removeAttributes', [ATTRIBUTE1, ATTRIBUTE2]);
-    </script>
-    <script>
-      Sprig('setEmail', 'EMAIL_ADDRESS');
-    </script>
   </body>
 </html>
