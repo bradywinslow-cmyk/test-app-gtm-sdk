@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Routes, Route, Link, Navigate, useNavigate } from "react-router-dom";
+import { createClient } from "@supabase/supabase-js";
 
 // --- Types ---
 export type User = {
@@ -8,27 +9,32 @@ export type User = {
   email: string;
 };
 
-export type Booking = {
+export type BookingRow = {
   id: string;
-  userId: string;
+  user_id: string;
   service: "Walk" | "Drop-in" | "Overnight";
-  date: string; // ISO date (yyyy-mm-dd)
-  time: string; // HH:MM
-  durationMins: number;
+  date: string; // YYYY-MM-DD
+  time: string; // HH:MM:SS
+  duration_mins: number;
   pets: number;
-  notes?: string;
-  createdAt: string; // ISO timestamp
+  notes?: string | null;
+  created_at: string;
 };
 
-// --- Auth Context (very lightweight; swap for your real auth later) ---
+// --- Supabase Client ---
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
+const supabaseAnon = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+export const supabase = createClient(supabaseUrl, supabaseAnon);
+
+// --- Auth Context (Supabase) ---
 interface AuthContextValue {
   user: User | null;
-  login: (email: string, name: string) => void;
-  logout: () => void;
+  signUp: (email: string, password: string, name?: string) => Promise<void>;
+  signIn: (email: string, password: string) => Promise<void>;
+  signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
-
 function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within <AuthProvider>");
@@ -39,67 +45,65 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
-    const raw = localStorage.getItem("dw_user");
-    if (raw) setUser(JSON.parse(raw));
+    supabase.auth.getSession().then(({ data }) => {
+      const u = data.session?.user;
+      setUser(u ? { id: u.id, name: (u.user_metadata?.name as string) ?? (u.email as string), email: u.email as string } : null);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, session) => {
+      const u = session?.user;
+      setUser(u ? { id: u.id, name: (u.user_metadata?.name as string) ?? (u.email as string), email: u.email as string } : null);
+    });
+    return () => sub.subscription.unsubscribe();
   }, []);
 
-  const login = (email: string, name: string) => {
-    const fakeUser: User = {
-      id: crypto.randomUUID(),
-      name: name.trim() || email.split("@")[0],
-      email,
-    };
-    localStorage.setItem("dw_user", JSON.stringify(fakeUser));
-    setUser(fakeUser);
+  const signUp = async (email: string, password: string, name?: string) => {
+    const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { name } } });
+    if (error) throw error;
+    const u = data.user;
+    if (u) {
+      await supabase.from("profiles").upsert({ id: u.id, email: u.email, name: name ?? null });
+    }
   };
 
-  const logout = () => {
-    localStorage.removeItem("dw_user");
-    setUser(null);
+  const signIn = async (email: string, password: string) => {
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
   };
 
-  const value = useMemo(() => ({ user, login, logout }), [user]);
+  const signOut = async () => {
+    await supabase.auth.signOut();
+  };
+
+  const value = useMemo(() => ({ user, signUp, signIn, signOut }), [user]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-// --- Booking storage helpers ---
-const BOOKINGS_KEY = "dw_bookings";
-
-function readBookings(): Booking[] {
-  const raw = localStorage.getItem(BOOKINGS_KEY);
-  return raw ? (JSON.parse(raw) as Booking[]) : [];
+// --- Data helpers (Supabase) ---
+async function createBooking(data: Omit<BookingRow, "id" | "created_at">): Promise<BookingRow> {
+  const { data: rows, error } = await supabase.from("bookings").insert(data).select("*").limit(1);
+  if (error) throw error;
+  return rows![0] as BookingRow;
 }
 
-function writeBookings(all: Booking[]) {
-  localStorage.setItem(BOOKINGS_KEY, JSON.stringify(all));
-}
-
-function createBooking(data: Omit<Booking, "id" | "createdAt">): Booking {
-  const booking: Booking = {
-    ...data,
-    id: crypto.randomUUID(),
-    createdAt: new Date().toISOString(),
-  };
-  const all = readBookings();
-  all.push(booking);
-  writeBookings(all);
-  return booking;
-}
-
-function listUserBookings(userId: string): Booking[] {
-  return readBookings().filter((b) => b.userId === userId);
+async function listUserBookings(userId: string): Promise<BookingRow[]> {
+  const { data, error } = await supabase
+    .from("bookings")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as BookingRow[];
 }
 
 // --- UI Components ---
 function NavBar() {
-  const { user, logout } = useAuth();
-
+  const { user, signOut } = useAuth();
   return (
     <nav className="w-full border-b border-gray-200 bg-white sticky top-0 z-50">
       <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
         <Link to="/" className="flex items-center gap-2">
           <span className="text-2xl">🐾</span>
-          <span className="font-semibold text-lg">Winston's Walkers</span>
+          <span className="font-semibold text-lg">Happy Trails</span>
         </Link>
         <div className="flex items-center gap-4">
           <Link className="hover:underline" to="/services">Services</Link>
@@ -111,14 +115,10 @@ function NavBar() {
           {user ? (
             <>
               <Link to="/profile" className="text-sm text-gray-700">{user.name}</Link>
-              <button onClick={logout} className="px-3 py-1 rounded-full border hover:bg-gray-50 text-sm text-white">
-                Log out
-              </button>
+              <button onClick={signOut} className="px-3 py-1 rounded-full border hover:bg-gray-50 text-sm">Log out</button>
             </>
           ) : (
-            <Link to="/login" className="px-3 py-1 rounded-full border bg-black text-white text-sm">
-              Create profile / Login
-            </Link>
+            <Link to="/login" className="px-3 py-1 rounded-full border bg-black text-white text-sm">Create profile / Login</Link>
           )}
         </div>
       </div>
@@ -211,102 +211,66 @@ function Testimonials() {
 
 // --- Auth pages ---
 function Login() {
-  const { user, login } = useAuth();
+  const { user, signUp, signIn } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (user) navigate("/profile");
-  }, [user, navigate]);
+  useEffect(() => { if (user) navigate("/profile"); }, [user, navigate]);
 
-  const onSubmit = (e: React.FormEvent) => {
+  const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email) return alert("Please enter your email.");
-    login(email, name);
-    navigate("/profile");
+    setErrorMsg(null);
+    setLoading(true);
+    try {
+      if (mode === "signin") {
+        await signIn(email, password);
+      } else {
+        await signUp(email, password, name);
+      }
+      navigate("/profile");
+    } catch (err: any) {
+      setErrorMsg(err.message ?? "Auth error");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
     <main className="max-w-md mx-auto p-6">
-      <h2 className="text-2xl font-semibold mb-4">Login</h2>
+      <h2 className="text-2xl font-semibold mb-4">Create profile / Login</h2>
       <form onSubmit={onSubmit} className="space-y-3">
+        <div className="flex items-center justify-between text-sm">
+          <label className="flex items-center gap-2">
+            <input type="radio" className="accent-black" checked={mode==='signin'} onChange={() => setMode('signin')} />
+            Sign in
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="radio" className="accent-black" checked={mode==='signup'} onChange={() => setMode('signup')} />
+            Create account
+          </label>
+        </div>
+        {errorMsg && <p className="text-sm text-red-600">{errorMsg}</p>}
         <div>
-          <label className="block text-sm mb-1" htmlFor='name'>Name</label>
-          <input
-            className="w-full border rounded-xl p-2"
-            placeholder="Fido’s human"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            autoComplete="name"
-            name="name"
-            id="name"
-          />
+          <label className="block text-sm mb-1">Name {mode==='signup' && <span className="text-gray-400">(optional)</span>}</label>
+          <input className="w-full border rounded-xl p-2" placeholder="Fido’s human" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
         </div>
         <div>
-          <label className="block text-sm mb-1" htmlFor='email'>Email</label>
-          <input
-            className="w-full border rounded-xl p-2"
-            type="email"
-            placeholder="you@example.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-            required
-            name="email"
-            id="email"
-          />
+          <label className="block text-sm mb-1">Email</label>
+          <input className="w-full border rounded-xl p-2" type="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} required />
         </div>
-        <button className="w-full px-4 py-2 rounded-xl bg-black text-white">Continue</button>
+        <div>
+          <label className="block text-sm mb-1">Password</label>
+          <input className="w-full border rounded-xl p-2" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} required />
+        </div>
+        <button disabled={loading} className="w-full px-4 py-2 rounded-xl bg-black text-white disabled:opacity-60">
+          {loading ? "Working…" : (mode==='signin' ? "Sign in" : "Create account")}
+        </button>
       </form>
-    </main>
-  );
-}
-
-function Profile() {
-  const { user } = useAuth();
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    if (!user) navigate("/login");
-  }, [user, navigate]);
-
-  if (!user) return null;
-
-  const bookings = listUserBookings(user.id);
-
-  return (
-    <main className="max-w-3xl mx-auto p-6 space-y-6">
-      <section className="border rounded-2xl p-6">
-        <h2 className="text-2xl font-semibold mb-2">Your profile</h2>
-        <p><span className="text-gray-600">Name:</span> {user.name}</p>
-        <p><span className="text-gray-600">Email:</span> {user.email}</p>
-      </section>
-
-      <section className="border rounded-2xl p-6">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-lg font-semibold">Your bookings</h3>
-          <Link to="/book" className="text-sm underline">New booking</Link>
-        </div>
-        {bookings.length === 0 ? (
-          <p className="text-gray-600">No bookings yet.</p>
-        ) : (
-          <ul className="divide-y">
-            {bookings.map((b) => (
-              <li key={b.id} className="py-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-medium">{b.service}</p>
-                    <p className="text-sm text-gray-600">{b.date} at {b.time} • {b.durationMins} mins • {b.pets} {b.pets === 1 ? "pet" : "pets"}</p>
-                    {b.notes && <p className="text-sm text-gray-600">Notes: {b.notes}</p>}
-                  </div>
-                  <span className="text-xs text-gray-500">Booked {new Date(b.createdAt).toLocaleString()}</span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
     </main>
   );
 }
@@ -315,28 +279,40 @@ function Profile() {
 function Book() {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [service, setService] = useState<Booking["service"]>("Walk");
+  const [service, setService] = useState<BookingRow["service"]>("Walk");
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
   const [durationMins, setDurationMins] = useState(30);
   const [pets, setPets] = useState(1);
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!user) navigate("/login");
-  }, [user, navigate]);
-
+  useEffect(() => { if (!user) navigate('/login'); }, [user, navigate]);
   if (!user) return null;
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMsg(null);
     if (!date || !time) return alert("Please choose a date and time.");
     setSaving(true);
-    const booking = createBooking({ userId: user.id, service, date, time, durationMins, pets, notes });
-    setSaving(false);
-    navigate("/profile");
-    alert(`Booking confirmed for ${booking.date} at ${booking.time}.`);
+    try {
+      await createBooking({
+        user_id: user.id,
+        service,
+        date,
+        time: time.length === 5 ? `${time}:00` : time,
+        duration_mins: durationMins,
+        pets,
+        notes: notes || null,
+      });
+      navigate("/profile");
+      alert(`Booking confirmed for ${date} at ${time}.`);
+    } catch (err: any) {
+      setErrorMsg(err.message ?? "Error creating booking");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -345,7 +321,7 @@ function Book() {
       <form onSubmit={submit} className="space-y-4">
         <div>
           <label className="block text-sm mb-1">Service</label>
-          <select className="w-full border rounded-xl p-2" value={service} onChange={(e) => setService(e.target.value as Booking["service"])}>
+          <select className="w-full border rounded-xl p-2" value={service} onChange={(e) => setService(e.target.value as BookingRow["service"]) }>
             <option>Walk</option>
             <option>Drop-in</option>
             <option>Overnight</option>
@@ -364,36 +340,73 @@ function Book() {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-sm mb-1">Duration (mins)</label>
-            <input
-              className="w-full border rounded-xl p-2"
-              type="number"
-              min={20}
-              max={240}
-              step={10}
-              value={durationMins}
-              onChange={(e) => setDurationMins(Number(e.target.value))}
-            />
+            <input className="w-full border rounded-xl p-2" type="number" min={20} max={240} step={10} value={durationMins} onChange={(e) => setDurationMins(Number(e.target.value))} />
           </div>
           <div>
             <label className="block text-sm mb-1"># of pets</label>
-            <input
-              className="w-full border rounded-xl p-2"
-              type="number"
-              min={1}
-              max={6}
-              value={pets}
-              onChange={(e) => setPets(Number(e.target.value))}
-            />
+            <input className="w-full border rounded-xl p-2" type="number" min={1} max={6} value={pets} onChange={(e) => setPets(Number(e.target.value))} />
           </div>
         </div>
         <div>
           <label className="block text-sm mb-1">Notes</label>
           <textarea className="w-full border rounded-xl p-2" rows={3} placeholder="Gate code, special instructions…" value={notes} onChange={(e) => setNotes(e.target.value)} />
         </div>
-        <button disabled={saving} className="w-full px-4 py-2 rounded-xl bg-black text-white disabled:opacity-60">
-          {saving ? "Saving…" : "Confirm booking"}
-        </button>
+        {errorMsg && <p className="text-sm text-red-600">{errorMsg}</p>}
+        <button disabled={saving} className="w-full px-4 py-2 rounded-xl bg-black text-white disabled:opacity-60">{saving ? "Saving…" : "Confirm booking"}</button>
       </form>
+    </main>
+  );
+}
+
+function Profile() {
+  const { user } = useAuth();
+  const navigate = useNavigate();
+  const [bookings, setBookings] = useState<BookingRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => { if (!user) navigate('/login'); }, [user, navigate]);
+  useEffect(() => {
+    if (!user) return;
+    setLoading(true);
+    listUserBookings(user.id).then(setBookings).finally(() => setLoading(false));
+  }, [user]);
+
+  if (!user) return null;
+
+  return (
+    <main className="max-w-3xl mx-auto p-6 space-y-6">
+      <section className="border rounded-2xl p-6">
+        <h2 className="text-2xl font-semibold mb-2">Your profile</h2>
+        <p><span className="text-gray-600">Name:</span> {user.name}</p>
+        <p><span className="text-gray-600">Email:</span> {user.email}</p>
+      </section>
+
+      <section className="border rounded-2xl p-6">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-lg font-semibold">Your bookings</h3>
+          <Link to="/book" className="text-sm underline">New booking</Link>
+        </div>
+        {loading ? (
+          <p className="text-gray-600">Loading…</p>
+        ) : bookings.length === 0 ? (
+          <p className="text-gray-600">No bookings yet.</p>
+        ) : (
+          <ul className="divide-y">
+            {bookings.map((b) => (
+              <li key={b.id} className="py-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-medium">{b.service}</p>
+                    <p className="text-sm text-gray-600">{b.date} at {b.time.slice(0,5)} • {b.duration_mins} mins • {b.pets} {b.pets === 1 ? "pet" : "pets"}</p>
+                    {b.notes && <p className="text-sm text-gray-600">Notes: {b.notes}</p>}
+                  </div>
+                  <span className="text-xs text-gray-500">Booked {new Date(b.created_at).toLocaleString()}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </main>
   );
 }
@@ -418,22 +431,8 @@ export default function App() {
             <Route path="/pricing" element={<Pricing />} />
             <Route path="/testimonials" element={<Testimonials />} />
             <Route path="/login" element={<Login />} />
-            <Route
-              path="/book"
-              element={
-                <ProtectedRoute>
-                  <Book />
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/profile"
-              element={
-                <ProtectedRoute>
-                  <Profile />
-                </ProtectedRoute>
-              }
-            />
+            <Route path="/book" element={<ProtectedRoute><Book /></ProtectedRoute>} />
+            <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>
